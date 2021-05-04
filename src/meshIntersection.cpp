@@ -36,6 +36,7 @@ along with PinMesh.  If not, see <http://www.gnu.org/licenses/>.
 #include <parallel/algorithm>
 #include "triangleRetesselation.h"
 #include "triangleClassification.h"
+#include <mpi.h>
 
 using namespace std;
 
@@ -63,6 +64,8 @@ double timeReadData,timeCreateGrid,timeDetectIntersections,timeRetesselate,timeC
 
 
 
+int world_rank;
+int world_size;
 
 Nested3DGridWrapper uniformGrid;
 
@@ -182,16 +185,24 @@ unsigned long long  processTriangleIntersections(MeshIntersectionGeometry &meshI
 
   unsigned long long totalIntersections = 0;
 
-  vector<pair<InputTriangle *,InputTriangle *> > vtPairsTrianglesToProcess;
+  vector<pair<InputTriangle *,InputTriangle *>> vtPairsTrianglesToProcess;
   
   cerr << "Getting pairs of triangles from grid cells" << "\n";
-  getPairsTrianglesInSameUnifGridCells(uniformGrid,vtPairsTrianglesToProcess);
+  getPairsTrianglesInSameUnifGridCells(uniformGrid, vtPairsTrianglesToProcess);
   clock_gettime(CLOCK_REALTIME, &t1);
   cerr << "Time creating list of pairs of triangles to process (intersection): " << convertTimeMsecs(diff(t0,t1))/1000 << "\n"; 
   //pairsTrianglesToProcess.reserve(1804900);
 
+  // calc size
+  int allPairsSize = vtPairsTrianglesToProcess.size();
+  int pairsSize = allPairsSize / world_size;
+  if (world_rank == 0) {
+    pairsSize += allPairsSize % world_rank;
+  }
 
-
+  // slice
+  vector<pair<InputTriangle *,InputTriangle *>> localVtPairsTrianglesToProcess(vtPairsTrianglesToProcess.begin() + pairsSize * world_rank, vtPairsTrianglesToProcess.begin() + pairsSize * (world_rank + 1));
+  vtPairsTrianglesToProcess = localVtPairsTrianglesToProcess;
 
   int numPairsToTest = vtPairsTrianglesToProcess.size();
   cerr << "Num pairs to test: " << numPairsToTest << endl;
@@ -276,104 +287,111 @@ unsigned long long  processTriangleIntersections(MeshIntersectionGeometry &meshI
 // TODO: if(a*b > 0 ) --> do not multiply!!! use test a>>0 && b>0 || a<0 && b<0
 
 int main(int argc, char **argv) {
-  if (argc!=7) {
+  MPI_Init(&argc, &argv);
+
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+    if (argc!=7) {
       cerr << "Error... use ./3dIntersection inputMesh0 inputMesh1 gridSizeLevel1 gridSizeLevel2 triggerSecondLevel outputFile.off" << endl;
       cerr << "The mesh file may be in the off, gts format or in the lium format (multimaterial)" << endl;
       exit(1);
-  }
-  clock_gettime(CLOCK_REALTIME, &t0BeginProgram);
+    }
 
-  string mesh0Path = argv[1];
-  string mesh1Path = argv[2];
-  int gridSizeLevel1 = atoi(argv[3]);
-  int gridSizeLevel2 = atoi(argv[4]);
-  int triggerSecondLevel = atoi(argv[5]);
-  int maxTreeDepth = 2;
+    clock_gettime(CLOCK_REALTIME, &t0BeginProgram);
 
-  Print_Current_Process_Memory_Used();
-  cerr << "Reading meshes..." << endl;
+    string mesh0Path = argv[1];
+    string mesh1Path = argv[2];
+    int gridSizeLevel1 = atoi(argv[3]);
+    int gridSizeLevel2 = atoi(argv[4]);
+    int triggerSecondLevel = atoi(argv[5]);
+    int maxTreeDepth = 2;
 
-  timespec t0,t1;
-  clock_gettime(CLOCK_REALTIME, &t0); 
+    Print_Current_Process_Memory_Used();
+    cerr << "Reading meshes..." << endl;
 
-  {
-  MeshIntersectionGeometry meshIntersectionGeometry(mesh0Path,mesh1Path);
+    timespec t0,t1;
+    clock_gettime(CLOCK_REALTIME, &t0); 
 
-  clock_gettime(CLOCK_REALTIME, &t1);
-  t0AfterDatasetRead = t1;
-  cerr << "Time to read: " << convertTimeMsecs(diff(t0,t1))/1000 << endl;
-  timeReadData = convertTimeMsecs(diff(t0,t1))/1000; 
-  Print_Current_Process_Memory_Used();
+    {
+    MeshIntersectionGeometry meshIntersectionGeometry(mesh0Path,mesh1Path);
 
-
-  
-  meshIntersectionGeometry.printBoundingBoxes(); 
-
-  
-  
-  cerr <<"Creating nested grid..." << endl;
-
-  clock_gettime(CLOCK_REALTIME, &t0); 
+    clock_gettime(CLOCK_REALTIME, &t1);
+    t0AfterDatasetRead = t1;
+    cerr << "Time to read: " << convertTimeMsecs(diff(t0,t1))/1000 << endl;
+    timeReadData = convertTimeMsecs(diff(t0,t1))/1000; 
+    Print_Current_Process_Memory_Used();
 
 
+    
+    meshIntersectionGeometry.printBoundingBoxes(); 
 
-//  void init(const vector<Triangle *> trianglesInsert[2], const vector<Point> vertices[2], const int gridSizeLevel1, const int gridSizeLevel2, const Point &p0, const Point &p1,const long long prodThreshold);
+    
+    
+    cerr <<"Creating nested grid..." << endl;
 
-  TIME(uniformGrid.init(meshIntersectionGeometry, gridSizeLevel1,gridSizeLevel2,triggerSecondLevel));
-
-
-  clock_gettime(CLOCK_REALTIME, &t1);
-  cerr << "Time to create and refine grid: " << convertTimeMsecs(diff(t0,t1))/1000 << endl;
-  timeCreateGrid = convertTimeMsecs(diff(t0,t1))/1000; 
-
-
-  vector< pair<const InputTriangle *,vector<BoundaryPolygon>> > polygonsFromRetesselationOfEachTriangle[2];
-
-   //After the uniform grid is initialized, let's compute the intersection between the triangles...
-  cerr << "Detecting intersections..." << endl;
-  clock_gettime(CLOCK_REALTIME, &t0); 
-  unordered_set<const InputTriangle *> trianglesThatIntersect[2];
-
-  //because we use pointers to vertices we need to keep the vertices from intersection allocated in the memory
-  //during the lifetime of our program...
-  vector< pair<VertexFromIntersection, VertexFromIntersection> >  edgesFromIntersection;
-  unsigned long long numIntersectionsDetected = processTriangleIntersections(meshIntersectionGeometry,&uniformGrid,trianglesThatIntersect,polygonsFromRetesselationOfEachTriangle,edgesFromIntersection);
-
-  clock_gettime(CLOCK_REALTIME, &t1);
-  cerr << "Time to detect intersections (includes time for computing statistics and for saving intersections for debugging): " << convertTimeMsecs(diff(t0,t1))/1000 << endl;
-  //Print_Current_Process_Memory_Used();
-
-
-  clock_gettime(CLOCK_REALTIME, &t0); 
-
-  ofstream outputStream(argv[6]);
-  assert(outputStream);
-
-  timeClassifyTriangles = classifyTrianglesAndGenerateOutput(&uniformGrid, meshIntersectionGeometry, 
-                                        trianglesThatIntersect,
-                                        polygonsFromRetesselationOfEachTriangle,                                                                               
-                                        outputStream);
-  
-
-  clock_gettime(CLOCK_REALTIME, &t1);
-  cerr << "Total time to classify triangles and generate output: " << convertTimeMsecs(diff(t0,t1))/1000 << endl;
-  Print_Current_Process_Memory_Used();
-
-
-  cerr << "----------------------------------------------------" << endl;
-  cerr << "Summary of ACTUAL times (excluding the times to compute statistics, to write edges for debugging, etc): " << endl;
-  cerr << "Time to read the data         : " << timeReadData << endl;
-  cerr << "Time to create and refine grid: " << timeCreateGrid << endl;
-  cerr << "Time to detect intersections  : " << timeDetectIntersections << endl;  
-  cerr << "Time to retesselate trinagles : " << timeRetesselate << endl;
-  cerr << "Time to classify the triangles: " << timeClassifyTriangles << endl;
-  cerr << "----------------------------------------------------" << endl;
-  cerr << "Total time (excluding I/O)    : " << timeCreateGrid+timeDetectIntersections+timeRetesselate+timeClassifyTriangles << endl;
-
-
-  }
-  cerr << "Mesh intersection geometry fred" << endl; 
+    clock_gettime(CLOCK_REALTIME, &t0); 
 
 
 
+  //  void init(const vector<Triangle *> trianglesInsert[2], const vector<Point> vertices[2], const int gridSizeLevel1, const int gridSizeLevel2, const Point &p0, const Point &p1,const long long prodThreshold);
+
+    TIME(uniformGrid.init(meshIntersectionGeometry, gridSizeLevel1,gridSizeLevel2,triggerSecondLevel));
+
+
+    clock_gettime(CLOCK_REALTIME, &t1);
+    cerr << "Time to create and refine grid: " << convertTimeMsecs(diff(t0,t1))/1000 << endl;
+    timeCreateGrid = convertTimeMsecs(diff(t0,t1))/1000; 
+
+
+    vector< pair<const InputTriangle *,vector<BoundaryPolygon>> > polygonsFromRetesselationOfEachTriangle[2];
+
+     //After the uniform grid is initialized, let's compute the intersection between the triangles...
+    cerr << "Detecting intersections..." << endl;
+    clock_gettime(CLOCK_REALTIME, &t0); 
+    unordered_set<const InputTriangle *> trianglesThatIntersect[2];
+
+    //because we use pointers to vertices we need to keep the vertices from intersection allocated in the memory
+    //during the lifetime of our program...
+    vector< pair<VertexFromIntersection, VertexFromIntersection> >  edgesFromIntersection;
+    unsigned long long numIntersectionsDetected = processTriangleIntersections(meshIntersectionGeometry,&uniformGrid,trianglesThatIntersect,polygonsFromRetesselationOfEachTriangle,edgesFromIntersection);
+
+    clock_gettime(CLOCK_REALTIME, &t1);
+    cerr << "Time to detect intersections (includes time for computing statistics and for saving intersections for debugging): " << convertTimeMsecs(diff(t0,t1))/1000 << endl;
+    //Print_Current_Process_Memory_Used();
+
+
+    clock_gettime(CLOCK_REALTIME, &t0); 
+
+    ofstream outputStream(argv[6] + to_string(world_rank));
+    assert(outputStream);
+
+    timeClassifyTriangles = classifyTrianglesAndGenerateOutput(&uniformGrid, meshIntersectionGeometry, 
+                                          trianglesThatIntersect,
+                                          polygonsFromRetesselationOfEachTriangle,                                                                               
+                                          outputStream);
+    
+
+    clock_gettime(CLOCK_REALTIME, &t1);
+    cerr << "Total time to classify triangles and generate output: " << convertTimeMsecs(diff(t0,t1))/1000 << endl;
+    Print_Current_Process_Memory_Used();
+
+
+    cerr << "----------------------------------------------------" << endl;
+    cerr << "Summary of ACTUAL times (excluding the times to compute statistics, to write edges for debugging, etc): " << endl;
+    cerr << "Time to read the data         : " << timeReadData << endl;
+    cerr << "Time to create and refine grid: " << timeCreateGrid << endl;
+    cerr << "Time to detect intersections  : " << timeDetectIntersections << endl;  
+    cerr << "Time to retesselate trinagles : " << timeRetesselate << endl;
+    cerr << "Time to classify the triangles: " << timeClassifyTriangles << endl;
+    cerr << "----------------------------------------------------" << endl;
+    cerr << "Total time (excluding I/O)    : " << timeCreateGrid+timeDetectIntersections+timeRetesselate+timeClassifyTriangles << endl;
+
+
+    }
+    cerr << "Mesh intersection geometry fred" << endl;
+
+  MPI_Finalize();
+
+  return 0;
 }
