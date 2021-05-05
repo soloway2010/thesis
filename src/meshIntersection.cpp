@@ -66,6 +66,8 @@ double timeReadData,timeCreateGrid,timeDetectIntersections,timeRetesselate,timeC
 
 int world_rank;
 int world_size;
+int dims[3];
+int coords[3];
 
 Nested3DGridWrapper uniformGrid;
 
@@ -142,10 +144,15 @@ void getPairsTrianglesInSameUnifGridCells(const Nested3DGridWrapper *uniformGrid
   int gridSizeLevel1 =  uniformGrid->gridSizeLevel1;
   int gridSizeLevel2 =  uniformGrid->gridSizeLevel2;
 
+  int iiSize = gridSizeLevel1 / dims[0];
+  int jjSize = gridSizeLevel1 / dims[1];
+  int kkSize = gridSizeLevel1 / dims[2];
 
-  for(int i=0;i<gridSizeLevel1;i++) 
-    for(int j=0;j<gridSizeLevel1;j++) 
-      for(int k=0;k<gridSizeLevel1;k++) {
+  cerr << world_rank <<  " i: " << iiSize << "j: " << jjSize << "k: " << kkSize << endl;
+
+  for(int i=iiSize * (coords[0]);i<iiSize * (coords[0] + 1);i++) 
+    for(int j=jjSize * (coords[1]);j<jjSize * (coords[1] + 1);j++) 
+      for(int k=kkSize * (coords[2]);k<kkSize * (coords[2] + 1);k++) {
         if (uniformGrid->grid.hasSecondLevel(i,j,k) ) {
           Nested3DGrid *secondLevelGrid = uniformGrid->grid.getChildGrid(i,j,k); 
           for(int iLevel2=0;iLevel2<gridSizeLevel2;iLevel2++) 
@@ -192,17 +199,6 @@ unsigned long long  processTriangleIntersections(MeshIntersectionGeometry &meshI
   clock_gettime(CLOCK_REALTIME, &t1);
   cerr << "Time creating list of pairs of triangles to process (intersection): " << convertTimeMsecs(diff(t0,t1))/1000 << "\n"; 
   //pairsTrianglesToProcess.reserve(1804900);
-
-  // calc size
-  int allPairsSize = vtPairsTrianglesToProcess.size();
-  int pairsSize = allPairsSize / world_size;
-  if (world_rank == 0) {
-    pairsSize += allPairsSize % world_rank;
-  }
-
-  // slice
-  vector<pair<InputTriangle *,InputTriangle *>> localVtPairsTrianglesToProcess(vtPairsTrianglesToProcess.begin() + pairsSize * world_rank, vtPairsTrianglesToProcess.begin() + pairsSize * (world_rank + 1));
-  vtPairsTrianglesToProcess = localVtPairsTrianglesToProcess;
 
   int numPairsToTest = vtPairsTrianglesToProcess.size();
   cerr << "Num pairs to test: " << numPairsToTest << endl;
@@ -289,8 +285,16 @@ unsigned long long  processTriangleIntersections(MeshIntersectionGeometry &meshI
 int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
 
+  MPI_Comm comm;
+  int periods[3];
+  periods[0] = 0; periods[1] = 0; periods[2] = 0;
+
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+  MPI_Dims_create(world_size, 3, dims);
+  MPI_Cart_create(MPI_COMM_WORLD, 3, dims, periods, 0, &comm);
+  MPI_Cart_coords(comm, world_rank, 2, coords);
 
     if (argc!=7) {
       cerr << "Error... use ./3dIntersection inputMesh0 inputMesh1 gridSizeLevel1 gridSizeLevel2 triggerSecondLevel outputFile.off" << endl;
@@ -363,7 +367,7 @@ int main(int argc, char **argv) {
 
     clock_gettime(CLOCK_REALTIME, &t0); 
 
-    ofstream outputStream(argv[6] + to_string(world_rank));
+    ofstream outputStream(argv[6] + to_string(world_rank) + ".off");
     assert(outputStream);
 
     timeClassifyTriangles = classifyTrianglesAndGenerateOutput(&uniformGrid, meshIntersectionGeometry, 
